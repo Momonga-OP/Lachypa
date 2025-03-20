@@ -8,7 +8,7 @@ on:
     branches:
       - main
   schedule:
-    - cron: '0 */5 * * *'  # Triggers deployment every 5 hours
+    - cron: '0 0,5,10,15,20 * * *'  # Runs every 5 hours
 
 jobs:
   test:
@@ -25,14 +25,32 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt  # Install dependencies
-          pip install pytest  # Explicitly install pytest
-
-      - name: Set bot token
-        run: echo "DISCORD_BOT_TOKEN=${{ secrets.DISCORD_BOT_TOKEN }}" >> $GITHUB_ENV
+          pip install -r requirements.txt
+          pip install pytest
 
       - name: Run tests
         run: pytest
-        shell: bash
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+
+  deploy:
+    needs: test  # Ensures tests pass before deploying
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Start Bot
+        run: python bot.py  # Adjust this if your bot's entry file has a different name
         env:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
