@@ -9,6 +9,8 @@ import logging
 import re
 import unicodedata
 from googletrans import Translator  # Import Translator
+import datetime
+from math import ceil
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -38,7 +40,7 @@ tree = bot.tree  # Use the bot's CommandTree for slash commands
 def normalize_text(input_text):
     normalized = unicodedata.normalize('NFD', input_text)
     normalized = normalized.encode('ascii', 'ignore').decode('utf-8')
-    normalized = re.sub(r"l[’']", "l ", normalized)
+    normalized = re.sub(r"l['']", "l ", normalized)
     return normalized.lower()
 
 def scrape_quest_guide(quest_name):
@@ -108,32 +110,131 @@ async def path_command(interaction: discord.Interaction, path_name: str, languag
     else:
         await interaction.followup.send(f"Path guide for '{path_name}' not found.")
 
-@tree.command(name="super", description="Create invite links for all servers the bot is in.")
-async def super_command(interaction: discord.Interaction):
+@tree.command(name="super", description="Create invite links and show server information for all servers the bot is in.")
+@app_commands.describe(
+    page="Page number to view (default: 1)",
+    category="Category to filter by (size, age, none)",
+    items_per_page="Number of servers to show per page (default: 5)"
+)
+async def super_command(
+    interaction: discord.Interaction, 
+    page: int = 1, 
+    category: str = "none", 
+    items_per_page: int = 5
+):
     if interaction.user.id != BOT_CREATOR_ID:
         await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
 
     await interaction.response.defer(ephemeral=True)
-
-    invite_links = []
+    
+    # Collect server information with error handling
+    server_info = []
     for guild in bot.guilds:
-        text_channel = next((channel for channel in guild.text_channels if channel.permissions_for(guild.me).create_instant_invite), None)
-        if text_channel:
-            try:
-                invite = await text_channel.create_invite(max_age=0, max_uses=0)
-                invite_links.append(f"{guild.name}: {invite.url}")
-            except discord.Forbidden:
-                invite_links.append(f"{guild.name}: Unable to create invite link (Missing Permissions)")
+        try:
+            # Get member count with human/bot breakdown
+            member_count = guild.member_count
+            bot_count = sum(1 for member in guild.members if member.bot)
+            human_count = member_count - bot_count
+            
+            # Get creation date
+            creation_date = guild.created_at.strftime("%Y-%m-%d")
+            days_old = (datetime.datetime.now().replace(tzinfo=datetime.timezone.utc) - guild.created_at).days
+            
+            # Get channel counts
+            text_channels = len(guild.text_channels)
+            voice_channels = len(guild.voice_channels)
+            
+            # Try to create an invite link
+            invite_url = "No suitable channel for invite"
+            text_channel = next((channel for channel in guild.text_channels if channel.permissions_for(guild.me).create_instant_invite), None)
+            if text_channel:
+                try:
+                    invite = await text_channel.create_invite(max_age=0, max_uses=0)
+                    invite_url = invite.url
+                except discord.Forbidden:
+                    invite_url = "Unable to create invite (Missing Permissions)"
+                except Exception as e:
+                    invite_url = f"Error creating invite: {str(e)[:50]}"
+            
+            server_info.append({
+                "name": guild.name,
+                "id": guild.id,
+                "members": member_count,
+                "humans": human_count,
+                "bots": bot_count,
+                "created": creation_date,
+                "age_days": days_old,
+                "text_channels": text_channels,
+                "voice_channels": voice_channels,
+                "owner": str(guild.owner),
+                "invite": invite_url
+            })
+        except Exception as e:
+            server_info.append({
+                "name": getattr(guild, "name", "Unknown"),
+                "id": getattr(guild, "id", "Unknown"),
+                "error": f"Failed to get complete info: {str(e)[:100]}"
+            })
+    
+    # Categorize servers if requested
+    if category.lower() == "size":
+        server_info = sorted(server_info, key=lambda x: x.get("members", 0), reverse=True)
+    elif category.lower() == "age":
+        server_info = sorted(server_info, key=lambda x: x.get("age_days", 0), reverse=True)
+    
+    # Pagination logic
+    total_servers = len(server_info)
+    max_pages = ceil(total_servers / items_per_page)
+    
+    if page < 1:
+        page = 1
+    if page > max_pages:
+        page = max_pages
+    
+    start_idx = (page - 1) * items_per_page
+    end_idx = min(start_idx + items_per_page, total_servers)
+    current_page_servers = server_info[start_idx:end_idx]
+    
+    # Format message
+    message_parts = [f"**Server Information (Page {page}/{max_pages})**\n"]
+    
+    for idx, server in enumerate(current_page_servers, start=start_idx + 1):
+        if "error" in server:
+            message_parts.append(f"{idx}. **{server['name']}** (ID: {server['id']})\n   Error: {server['error']}\n")
         else:
-            invite_links.append(f"{guild.name}: No suitable text channel found")
-
+            message_parts.append(
+                f"{idx}. **{server['name']}** (ID: {server['id']})\n"
+                f"   Members: {server['members']} ({server['humans']} humans, {server['bots']} bots)\n"
+                f"   Created: {server['created']} ({server['age_days']} days ago)\n"
+                f"   Channels: {server['text_channels']} text, {server['voice_channels']} voice\n"
+                f"   Owner: {server['owner']}\n"
+                f"   Invite: {server['invite']}\n"
+            )
+    
+    pagination_info = f"Showing {start_idx + 1}-{end_idx} of {total_servers} servers"
+    if max_pages > 1:
+        pagination_info += f" | Use `/super page:{page+1}` for next page"
+    
+    message_parts.append(f"\n{pagination_info}")
+    
+    # Send to the creator
     creator = await bot.fetch_user(BOT_CREATOR_ID)
     if creator:
-        dm_message = "\n".join(invite_links)
-        await creator.send(f"Here are the invite links for all servers:\n{dm_message}")
+        dm_message = "\n".join(message_parts)
+        try:
+            await creator.send(dm_message)
+        except discord.HTTPException as e:
+            # If message is too long, try to send in chunks
+            if len(dm_message) > 2000:
+                chunks = [dm_message[i:i + 1900] for i in range(0, len(dm_message), 1900)]
+                for chunk in chunks:
+                    await creator.send(chunk)
+            else:
+                await interaction.followup.send(f"Error sending DM: {e}", ephemeral=True)
+                return
 
-    await interaction.followup.send("Invite links have been sent to your DM.", ephemeral=True)
+    await interaction.followup.send(f"Server information (page {page}/{max_pages}) has been sent to your DM.", ephemeral=True)
 
 @tree.command(name="me", description="Provoke Omega protocol.")
 async def me_command(interaction: discord.Interaction):
