@@ -12,6 +12,7 @@ from googletrans import Translator  # Import Translator
 import datetime
 from math import ceil
 
+
 # Logging setu
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
